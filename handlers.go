@@ -1,39 +1,104 @@
 package main
 
 import (
+	"fmt"
+
 	"time"
 
 	r "github.com/dancannon/gorethink"
 	"github.com/mitchellh/mapstructure"
 )
 
+//ChannelStop, UserStop, MessageStop constants for easily keeping track of which channels to stop
 const (
 	ChannelStop = iota
 	UserStop
 	MessageStop
 )
 
+//Message implements a new type
 type Message struct {
 	Name string      `json:"name"`
 	Data interface{} `json:"data"`
 }
 
+//Channel implements a new Channel type for message channels
 type Channel struct {
-	Id   string `json:"id" gorethink:"id,omitempty"`
+	ID   string `json:"id" gorethink:"id,omitempty"`
 	Name string `json:"name" gorethink:"name"`
 }
 
+//User implements a new User type
 type User struct {
-	Id   string `gorethink:"id,omitempty"`
+	ID   string `gorethink:"id,omitempty"`
 	Name string `gorethink:"name"`
 }
 
 type ChannelMessage struct {
-	Id        string    `gorethink:"id,omitempty"`
-	ChannelId string    `gorethink:"channelId"`
+	ID        string    `gorethink:"id, omitempty"`
+	ChannelID string    `gorethink:"channelId"`
 	Body      string    `gorethink:"body"`
 	Author    string    `gorethink:"author"`
 	CreatedAt time.Time `gorethink:"createdAt"`
+}
+
+func addChannel(client *Client, data interface{}) {
+	var channel Channel
+	error := mapstructure.Decode(data, &channel)
+
+	if error != nil {
+		client.send <- Message{"error", error.Error()}
+		return
+	}
+	go func() {
+		err := r.Table("channel").
+			Insert(channel).
+			Exec(client.session)
+
+		if err != nil {
+			client.send <- Message{"error", err.Error()}
+		}
+	}()
+}
+
+func subscribeChannel(client *Client, data interface{}) {
+	stop := client.NewStopChannel(ChannelStop)
+	result := make(chan r.ChangeResponse)
+
+	cursor, err := r.Table("channel").
+		Changes(r.ChangesOpts{IncludeInitial: true}).
+		Run(client.session)
+
+	go func() {
+		if err != nil {
+			client.send <- Message{"error", err.Error()}
+		}
+
+		var change r.ChangeResponse
+
+		for cursor.Next(&change) {
+			result <- change
+		}
+	}()
+
+	go func() {
+		for {
+			select {
+			case <-stop:
+				cursor.Close()
+				return
+			case change := <-result:
+				if change.NewValue != nil && change.OldValue == nil {
+					client.send <- Message{"channel add", change.NewValue}
+					fmt.Println("sent channel add msg")
+				}
+			}
+		}
+	}()
+}
+
+func unsubscribeChannel(client *Client, data interface{}) {
+	client.StopForKey(ChannelStop)
 }
 
 func editUser(client *Client, data interface{}) {
@@ -44,6 +109,7 @@ func editUser(client *Client, data interface{}) {
 		return
 	}
 	client.userName = user.Name
+
 	go func() {
 		_, err := r.Table("user").
 			Get(client.id).
@@ -86,6 +152,7 @@ func addChannelMessage(client *Client, data interface{}) {
 		err := r.Table("message").
 			Insert(channelMessage).
 			Exec(client.session)
+
 		if err != nil {
 			client.send <- Message{"error", err.Error()}
 		}
@@ -122,43 +189,7 @@ func unsubscribeChannelMessage(client *Client, data interface{}) {
 	client.StopForKey(MessageStop)
 }
 
-func addChannel(client *Client, data interface{}) {
-	var channel Channel
-	err := mapstructure.Decode(data, &channel)
-	if err != nil {
-		client.send <- Message{"error", err.Error()}
-		return
-	}
-	go func() {
-		err = r.Table("channel").
-			Insert(channel).
-			Exec(client.session)
-		if err != nil {
-			client.send <- Message{"error", err.Error()}
-		}
-	}()
-}
-
-func subscribeChannel(client *Client, data interface{}) {
-	go func() {
-		stop := client.NewStopChannel(ChannelStop)
-		cursor, err := r.Table("channel").
-			Changes(r.ChangesOpts{IncludeInitial: true}).
-			Run(client.session)
-		if err != nil {
-			client.send <- Message{"error", err.Error()}
-			return
-		}
-		changeFeedHelper(cursor, "channel", client.send, stop)
-	}()
-}
-
-func unsubscribeChannel(client *Client, data interface{}) {
-	client.StopForKey(ChannelStop)
-}
-
-func changeFeedHelper(cursor *r.Cursor, changeEventName string,
-	send chan<- Message, stop <-chan bool) {
+func changeFeedHelper(cursor *r.Cursor, changeEventName string, send chan<- Message, stop <-chan bool) {
 	change := make(chan r.ChangeResponse)
 	cursor.Listen(change)
 	for {

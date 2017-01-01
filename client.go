@@ -7,8 +7,7 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-type FindHandler func(string) (Handler, bool)
-
+//Client implements a new type
 type Client struct {
 	send         chan Message
 	socket       *websocket.Conn
@@ -19,33 +18,39 @@ type Client struct {
 	userName     string
 }
 
-func (c *Client) NewStopChannel(stopKey int) chan bool {
-	c.StopForKey(stopKey)
+//FindHandler implements a new type
+type FindHandler func(string) (Handler, bool)
+
+//NewStopChannel implements a method for stiopping go routines
+func (client *Client) NewStopChannel(stopKey int) chan bool {
+	client.StopForKey(stopKey)
 	stop := make(chan bool)
-	c.stopChannels[stopKey] = stop
+	client.stopChannels[stopKey] = stop
 	return stop
 }
 
-func (c *Client) StopForKey(key int) {
-	if ch, found := c.stopChannels[key]; found {
+func (client *Client) StopForKey(key int) {
+	if ch, found := client.stopChannels[key]; found {
 		ch <- true
-		delete(c.stopChannels, key)
+		delete(client.stopChannels, key)
 	}
 }
 
+//Read implements a new method
 func (client *Client) Read() {
 	var message Message
 	for {
 		if err := client.socket.ReadJSON(&message); err != nil {
 			break
 		}
+
 		if handler, found := client.findHandler(message.Name); found {
 			handler(client, message.Data)
 		}
 	}
-	client.socket.Close()
 }
 
+//Write implements a new method
 func (client *Client) Write() {
 	for msg := range client.send {
 		if err := client.socket.WriteJSON(msg); err != nil {
@@ -55,17 +60,17 @@ func (client *Client) Write() {
 	client.socket.Close()
 }
 
-func (c *Client) Close() {
-	for _, ch := range c.stopChannels {
+//Close implements a new CLose method for Client
+func (client *Client) Close() {
+	for _, ch := range client.stopChannels {
 		ch <- true
 	}
-	close(c.send)
-	// delete user
-	r.Table("user").Get(c.id).Delete().Exec(c.session)
+
+	close(client.send)
 }
 
-func NewClient(socket *websocket.Conn, findHandler FindHandler,
-	session *r.Session) *Client {
+//NewClient implements a constructor method for new clients
+func NewClient(socket *websocket.Conn, findHandler FindHandler, session *r.Session) *Client {
 	var user User
 	user.Name = "anonymous"
 	res, err := r.Table("user").Insert(user).RunWrite(session)
